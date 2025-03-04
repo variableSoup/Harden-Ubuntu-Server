@@ -1,0 +1,113 @@
+---
+- name: Secure Ubuntu Server Setup
+  hosts: all
+  become: yes
+  vars:
+    admin_user: "adminuser"
+    users:
+      - "user1"
+      - "user2"
+      - "user3"
+    ssh_port: 2222
+
+  tasks:
+    - name: Update package lists
+      apt:
+        update_cache: yes
+
+    - name: Create admin user with sudo privileges
+      user:
+        name: "{{ admin_user }}"
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+        createhome: yes
+
+    - name: Create standard users without sudo privileges
+      user:
+        name: "{{ item }}"
+        shell: /bin/bash
+        createhome: yes
+      loop: "{{ users }}"
+
+    - name: Secure SSH configuration
+      blockinfile:
+        path: /etc/ssh/sshd_config
+        block: |
+          Port {{ ssh_port }}
+          PermitRootLogin no
+          PasswordAuthentication no
+          PubkeyAuthentication yes
+          MaxAuthTries 3
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+      notify: Restart SSH
+
+    - name: Setup firewall (iptables)
+      blockinfile:
+        path: /etc/iptables.rules
+        create: yes
+        block: |
+          *filter
+          -P INPUT DROP
+          -P FORWARD DROP
+          -P OUTPUT ACCEPT
+          -A INPUT -i lo -j ACCEPT
+          -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+          -A INPUT -p tcp --dport {{ ssh_port }} -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+          COMMIT
+      notify: Apply iptables rules
+
+    - name: Install iptables-persistent to save rules
+      apt:
+        name: iptables-persistent
+        state: present
+
+    - name: Enable iptables restore on boot
+      lineinfile:
+        path: /etc/rc.local
+        line: "iptables-restore < /etc/iptables.rules"
+        create: yes
+        mode: '0755'
+
+    - name: Install Fail2Ban
+      apt:
+        name: fail2ban
+        state: present
+
+    - name: Configure Fail2Ban for SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [sshd]
+          enabled = true
+          port = {{ ssh_port }}
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 3
+          bantime = 600
+          findtime = 600
+      notify: Restart Fail2Ban
+
+    - name: Install system monitoring tools
+      apt:
+        name:
+          - htop
+          - glances
+          - net-tools
+        state: present
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: ssh
+        state: restarted
+
+    - name: Apply iptables rules
+      command: iptables-restore < /etc/iptables.rules
+
+    - name: Restart Fail2Ban
+      service:
+        name: fail2ban
+        state: restarted
